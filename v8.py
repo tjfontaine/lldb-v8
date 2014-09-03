@@ -119,20 +119,6 @@ def get_stack_frames(thread):
 
     return map(GetStackFrame, range(thread.GetNumFrames()))
 
-def load_symbol(target, symbol):
-	process = target.GetProcess()
-	syms = target.FindSymbols(symbol)
-	error = lldb.SBError()
-	if len(syms.symbols):
-		symbol = syms.symbols[0]
-		size = int(symbol.end_addr) - int(symbol.addr)
-		val = process.ReadMemory(int(symbol.addr), size, error)
-		if error.Success():
-			return bytearray_to_int(val, size)
-		else:
-			return error
-	else:
-		return None
 
 SYMBOLS = {
 	'major': ['_ZN2v88internal7Version6major_E'],
@@ -192,302 +178,343 @@ SYMBOLS = {
 	'V8_ELEMENTS_DICTIONARY_ELEMENTS': ['v8dbg_elements_dictionary_elements', None, 6],
 }
 
-FRAMETYPE = {}
-CLASS = {}
-TYPE = {}
+class V8Cfg:
+  def __init__(self, target):
+    self.target = target
+    self.process = target.GetProcess()
 
-def v8_is_smi(addr, internal_dict):
-	smi = internal_dict['V8_SmiTag']
-	mask = internal_dict['V8_SmiTagMask']
-	return ((addr & mask) == smi)
+    self.constants = {}
 
-def v8_smi(addr, internal_dict):
-	val = internal_dict['V8_SmiValueShift']
-	sze = internal_dict['V8_SmiShiftSize']
-	return (addr >> (val + sze))
+    self.frametype = {}
+    self.classes = {}
+    self.types = {}
 
-def read_type(process, addr, internal_dict):
-	heapoff = CLASS['HeapObject']['fields']['map']['offset'] - 1
-	mask = internal_dict['V8_HeapObjectTagMask']
-	tag = internal_dict['V8_HeapObjectTag']
-	aoff = CLASS['Map']['fields']['instance_attributes']['offset'] - 1
+    delay = []
+    for key, value in SYMBOLS.iteritems():
+      ret = self.load_symbol(value[0])
+      if isinstance(ret, lldb.SBError):
+        raise ret
+      elif ret is None:
+        if len(value) == 3:
+          ret = value[2]
+        elif len(value) == 2:
+          pass
+        else:
+          print 'failed to load symbol: ', key
 
-	error = lldb.SBError()
+      if ret is not None:
+        self.constants[key] = ret
 
-	maddr = process.ReadPointerFromMemory(addr + heapoff, error)
+    for i in range(target.GetNumModules()):
+      mod = target.GetModuleAtIndex(i)
+      for j in range(mod.GetNumSymbols()):
+        sym = mod.GetSymbolAtIndex(j)
+        if 'v8dbg_frametype_' in sym.name:
+          val = self.load_symbol(sym.name)
+          key = sym.name.replace('v8dbg_frametype_', '')
+          self.frametype[key] = val
+          self.frametype[val] = key
+        elif 'v8dbg_parent_' in sym.name:
+          val = self.load_symbol(sym.name)
+          key = sym.name.replace('v8dbg_parent_', '').split('__')
+          parent = key[1]
+          child = key[0]
+          parent_klass = self.classes.get(parent, { 'name': parent, 'fields': {} })
+          child_klass = self.classes.get(child, { 'name': child, 'parent': parent_klass, 'fields': {} })
 
-	if not error.Success():
-		return error
+          child_klass['parent'] = parent_klass
 
-	if (maddr & mask) != tag:
-		return False
+          self.classes[parent] = parent_klass
+          self.classes[child] = child_klass
+        elif 'v8dbg_class_' in sym.name:
+          val = self.load_symbol(sym.name)
+          key = sym.name.replace('v8dbg_class_', '').split('__')
 
-	hbyte = process.ReadMemory(maddr + aoff, 1, error)
 
-	if not error.Success():
-		return error
+          kname = key[0]
+          field = key[1]
+          ktype = key[2]
 
-	hbyte = bytearray_to_uint(hbyte, 1)
+          klass = self.classes.get(kname, { 'name': kname, 'fields': {} })
 
-	return TYPE[hbyte]
+          klass['fields'][field] = {
+            'type': ktype,
+            'name': field,
+            'offset': val,
+          }
+        elif 'v8dbg_type_' in sym.name:
+          val = self.load_symbol(sym.name)
+          key = sym.name.replace('v8dbg_type_', '')
+          self.types[key] = val
+          self.types[val] = key
 
-def read_heap_smi(process, addr, off, internal_dict):
-	error = lldb.SBError()
-	ptr = process.ReadPointerFromMemory(addr + off, error)
+    major = self.constants['major']
+    minor = self.constants['minor']
+    build = self.constants['build']
+    patch = self.constants['patch']
 
-	if not error.Success():
-		return error
+    self.version = '{major}.{minor}.{build}.{patch}'.format(**self.constants)
 
-	return v8_smi(ptr, internal_dict)
+  def load_symbol(self, symbol):
+    syms = self.target.FindSymbols(symbol)
+    error = lldb.SBError()
+    if len(syms.symbols):
+      symbol = syms.symbols[0]
+      size = int(symbol.end_addr) - int(symbol.addr)
+      val = self.process.ReadMemory(int(symbol.addr), size, error)
+      if error.Success():
+        return bytearray_to_int(val, size)
+      else:
+        return error
+    else:
+      return None
 
-def jstr_print_seq(process, addr, internal_dict):
-	strlen = CLASS['String']['fields']['length']['offset'] - 1
-	slen = read_heap_smi(process, addr, strlen, internal_dict)
-	if isinstance(slen, lldb.SBError):
-		return slen
+  def v8_is_smi(self, addr):
+    smi = self.constants['V8_SmiTag']
+    mask = self.constants['V8_SmiTagMask']
+    return ((addr & mask) == smi)
 
-	if not slen:
-		return 'anonymous'
+  def v8_smi(self, addr):
+    val = self.constants['V8_SmiValueShift']
+    sze = self.constants['V8_SmiShiftSize']
+    return (addr >> (val + sze))
 
-	## XXX
-	#off = CLASS['SeqAsciiString']['fields']['chars']['offset'] - 1
-	off = 23
+  def get_offset(self, name):
+    parts = name.split('.')
+    klass = self.classes.get(parts[0])
+    member = klass['fields'][parts[1]]
+    return member['offset'] - 1
 
-	error = lldb.SBError()
+  def read_type(self, addr):
+    heapoff = self.get_offset('HeapObject.map')
+    mask = self.constants['V8_HeapObjectTagMask']
+    tag = self.constants['V8_HeapObjectTag']
+    aoff = self.get_offset('Map.instance_attributes')
 
-	blob = process.ReadMemory(addr + off, slen, error)
+    error = lldb.SBError()
 
-	if not error.Success():
-		return error
+    maddr = self.process.ReadPointerFromMemory(addr + heapoff, error)
 
-	return blob
+    if not error.Success():
+      return error
+
+    if (maddr & mask) != tag:
+      return False
+
+    hbyte = self.process.ReadMemory(maddr + aoff, 1, error)
+
+    if not error.Success():
+      return error
+
+    hbyte = bytearray_to_uint(hbyte, 1)
+
+    return self.types[hbyte]
+
+  def read_heap_smi(self, addr, off):
+    error = lldb.SBError()
+    ptr = self.process.ReadPointerFromMemory(addr + off, error)
+
+    if not error.Success():
+      return error
+
+    return self.v8_smi(ptr)
+
+  def jstr_print_seq(self, addr):
+    strlen = self.get_offset('String.length')
+    slen = self.read_heap_smi(addr, strlen)
+    if isinstance(slen, lldb.SBError):
+      return slen
+
+    if not slen:
+      return 'anonymous'
+
+    ## XXX
+    #off = CLASS['SeqAsciiString']['fields']['chars']['offset'] - 1
+    off = 23
+
+    error = lldb.SBError()
+
+    blob = self.process.ReadMemory(addr + off, slen, error)
+
+    if not error.Success():
+      return error
+
+    return blob
 	
-def jstr_print(process, addr, internal_dict):
-	typename = read_type(process, addr, internal_dict)
-	if 'SeqAsciiString' in typename:
-		typename = jstr_print_seq(process, addr, internal_dict)
-	return typename
+  def jstr_print(self, addr):
+    typename = self.read_type(addr)
+    if 'SeqAsciiString' in typename:
+      typename = self.jstr_print_seq(addr)
+    return typename
 
-def jsfunc_name(process, internal_dict, pointer):
-	error = lldb.SBError()
-	off = CLASS['SharedFunctionInfo']['fields']['name']['offset'] - 1
+  def jsfunc_name(self, pointer):
+    error = lldb.SBError()
+    off = self.get_offset('SharedFunctionInfo.name')
 
-	fstr = process.ReadPointerFromMemory(pointer + off, error)
+    fstr = self.process.ReadPointerFromMemory(pointer + off, error)
 
-	if not error.Success():
-		return error
+    if not error.Success():
+      return error
 
-	name = jstr_print(process, fstr, internal_dict)
+    name = self.jstr_print(fstr)
 
-	return name
+    return name
 
-def jsstack_frame(debugger, result, internal_dict, target, thread, fp):
-	error = lldb.SBError()
-	process = target.GetProcess()
-	off = fp + internal_dict['V8_OFF_FP_CONTEXT']
-	pointer = process.ReadPointerFromMemory(off, error)
+  def jsstack_frame(self, result, thread, fp):
+    error = lldb.SBError()
+    off = fp + self.constants['V8_OFF_FP_CONTEXT']
+    pointer = self.process.ReadPointerFromMemory(off, error)
 
-	if not error.Success():
-		print >> result, 'error: ', error
-		return
+    if not error.Success():
+      print >> result, 'error: ', error
+      return
 
-	if v8_is_smi(pointer, internal_dict):
-		smi = v8_smi(pointer, internal_dict)
-		ft = FRAMETYPE.get(smi, None)
-		if ft:
-			return {
-				'fp': fp,
-				'val': '<{ft}>'.format(ft=ft),
-			}
-	off = fp + internal_dict['V8_OFF_FP_MARKER']
-	pointer = process.ReadPointerFromMemory(off, error)
+    if self.v8_is_smi(pointer):
+      smi = self.v8_smi(pointer)
+      ft = self.frametype.get(smi, None)
+      if ft:
+        return {
+          'fp': fp,
+          'val': '<{ft}>'.format(ft=ft),
+        }
 
-	if not error.Success():
-		print >> result, 'error: ', error
-		return
+    off = fp + self.constants['V8_OFF_FP_MARKER']
+    pointer = self.process.ReadPointerFromMemory(off, error)
 
-	if v8_is_smi(pointer, internal_dict):
-		smi = v8_smi(pointer, internal_dict)
-		ft = FRAMETYPE.get(smi, None)
-		if ft:
-			return {
-				'fp': fp,
-				'val': '<{ft}>'.format(ft=ft),
-			}
+    if not error.Success():
+      print >> result, error
+      return
 
-	off = fp + internal_dict['V8_OFF_FP_FUNCTION']
-	pointer = process.ReadPointerFromMemory(off, error)
+    if self.v8_is_smi(pointer):
+      smi = self.v8_smi(pointer)
+      ft = self.frametype.get(smi, None)
+      if ft:
+        return {
+          'fp': fp,
+          'val': '<{ft}>'.format(ft=ft),
+        }
 
-	if not error.Success():
-		print >> result, 'error: ', error
-		return
+    off = fp + self.constants['V8_OFF_FP_FUNCTION']
+    pointer = self.process.ReadPointerFromMemory(off, error)
+
+    if not error.Success():
+      print >> result, 'error: ', error
+      return
 	
-	typename = read_type(process, pointer, internal_dict)
+    typename = self.read_type(pointer)
 
-	if isinstance(typename, lldb.SBError):
-		print >> result, typename
-		return
+    if isinstance(typename, lldb.SBError):
+      print >> result, typename
+      return
 
-	if not typename:
-		#print >> result, '{addr:#016x} not a heap object'.format(addr=pointer)
-		return
+    if not typename:
+      #print >> result, '{addr:#016x} not a heap object'.format(addr=pointer)
+      return
 
-	if 'Code' in typename:
-		return {
-			'fp': fp,
-			'val': 'internal (Code: {pointer:#016x})'.format(pointer= pointer),
-		}
+    if 'Code' in typename:
+      return {
+        'fp': fp,
+        'val': 'internal (Code: {pointer:#016x})'.format(pointer= pointer),
+      }
 
-	off = CLASS['JSFunction']['fields']['shared']['offset'] - 1
+    off = self.get_offset('JSFunction.shared')
 
-	func = process.ReadPointerFromMemory(pointer + off, error)
+    func = self.process.ReadPointerFromMemory(pointer + off, error)
 
-	if not error.Success():
-		return error
+    if not error.Success():
+      return error
 
-	funcname = jsfunc_name(process, internal_dict, func)
+    funcname = self.jsfunc_name(func)
 
-	if isinstance(funcname, lldb.SBError):
-		return funcname
+    if isinstance(funcname, lldb.SBError):
+      return funcname
 
-	return {
-		'fp': fp,
-		'val': '<%s>' % funcname
-	}
+    return {
+      'fp': fp,
+      'val': '<%s>' % funcname
+    }
 	
-def jsframe(debugger, command, result, internal_dict):
-	args = shlex.split(command)
-	fp = int(args[0], 16)
-	target = debugger.GetSelectedTarget()
-	thread = target.process.GetSelectedThread()
-	frame = jsstack_frame(debugger, result, internal_dict, target, thread, fp)
-	print >> result, frame
+  def jsstack_thread(self, thread, result):
+    depth = thread.GetNumFrames()
 
-def jsstack_thread(debugger, result, internal_dict, target, thread):
-	depth = thread.GetNumFrames()
+    mods = get_module_names(thread)
+    funcs = get_function_names(thread)
+    symbols = get_symbol_names(thread)
+    files = get_filenames(thread)
+    lines = get_line_numbers(thread)
+    addrs = get_pc_addresses(thread)
 
-	mods = get_module_names(thread)
-	funcs = get_function_names(thread)
-	symbols = get_symbol_names(thread)
-	files = get_filenames(thread)
-	lines = get_line_numbers(thread)
-	addrs = get_pc_addresses(thread)
+    for i in range(depth):
+      frame = thread.GetFrameAtIndex(i)
+      function = frame.GetFunction()
 
-	for i in range(depth):
-		frame = thread.GetFrameAtIndex(i)
-		function = frame.GetFunction()
+      load_addr = addrs[i].GetLoadAddress(self.target)
+      if not function:
+        file_addr = addrs[i].GetFileAddress()
+        start_addr = frame.GetSymbol().GetStartAddress().GetFileAddress()
+        symbol_offset = file_addr - start_addr
+        mod=mods[i]
+        if not mod:
+          f = self.jsstack_frame(result, thread, frame.fp)
+        else:
+          f = {
+            'fp': load_addr,
+            'val': '{mod}`{symbol} + {offset}'.format(mod=mod, symbol=symbols[i], offset=symbol_offset),
+          }
 
-		load_addr = addrs[i].GetLoadAddress(target)
-		if not function:
-			file_addr = addrs[i].GetFileAddress()
-			start_addr = frame.GetSymbol().GetStartAddress().GetFileAddress()
-			symbol_offset = file_addr - start_addr
-			mod=mods[i]
-			if not mod:
-				f = jsstack_frame(debugger, result, internal_dict, target, thread, frame.fp)
-			else:
-				f = {
-					'fp': load_addr,
-					'val': '{mod}`{symbol} + {offset}'.format(mod=mod, symbol=symbols[i], offset=symbol_offset),
-				}
+        if isinstance(f, lldb.SBError):
+          print >> result, f
+        elif f:
+          print >> result, '  frame #{num}: {fp:#016x} {val}'.format(num=i, fp=f['fp'], val=f['val'])
+        else:
+          print >> result, '  frame #{num}: {fp:#016x} skipped'.format(num=i, fp=load_addr)
+          #print >> result, '  frame #{num}: {addr:#016x} {mod}`{symbol} + {offset}'.format(num=i, addr=load_addr, mod=mod, symbol=symbols[i], offset=symbol_offset)
+      else:
+        print >> result, '  frame #{num}: {addr:#016x} {mod}`{func} at {file}:{line} {args}'.format(
+          num=i, addr=load_addr, mod=mods[i],
+        func='%s [inlined]' % funcs[i] if frame.IsInlined() else funcs[i],
+        file=files[i], line=lines[i],
+        args=get_args_as_string(frame, showFuncName=False) if not frame.IsInlined() else '()')
 
-			if isinstance(f, lldb.SBError):
-				print >> result, f
-			elif f:
-				print >> result, '  frame #{num}: {fp:#016x} {val}'.format(num=i, fp=f['fp'], val=f['val'])
-			else:
-				print >> result, '  frame #{num}: {fp:#016x} skipped'.format(num=i, fp=load_addr)
-				#print >> result, '  frame #{num}: {addr:#016x} {mod}`{symbol} + {offset}'.format(num=i, addr=load_addr, mod=mod, symbol=symbols[i], offset=symbol_offset)
-		else:
-            		print >> result, '  frame #{num}: {addr:#016x} {mod}`{func} at {file}:{line} {args}'.format(
-                		num=i, addr=load_addr, mod=mods[i],
-				func='%s [inlined]' % funcs[i] if frame.IsInlined() else funcs[i],
-				file=files[i], line=lines[i],
-				args=get_args_as_string(frame, showFuncName=False) if not frame.IsInlined() else '()')
+  def jsstack(self, result):
+    threads = self.process.GetNumThreads()
+
+    for i in range(threads):
+      print >> result, 'thread #{i}'.format(i=i)
+      self.jsstack_thread(self.process.GetThreadAtIndex(i), result)
+    
 
 def jsstack(debugger, command, result, internal_dict):
-	target = debugger.GetSelectedTarget()
-	process = target.GetProcess()
+  v8cfg = internal_dict.get('v8cfg')
 
-	threads = process.GetNumThreads()
+  if not v8cfg:
+    v8cfg = V8Cfg(debugger.GetSelectedTarget())
+    internal_dict['v8cfg'] = v8cfg
 
-	for i in range(threads):
-		print >> result, 'thread #{i}'.format(i=i)
-		jsstack_thread(debugger, result, internal_dict, target, process.GetThreadAtIndex(i))
+  v8cfg.jsstack(result)
 
+
+def jsframe(debugger, command, result, internal_dict):
+  args = shlex.split(command)
+  fp = int(args[0], 16)
+
+  v8cfg = internal_dict.get('v8cfg')
+
+  if not v8cfg:
+    v8cfg = V8Cfg(debugger.GetSelectedTarget())
+    internal_dict['v8cfg'] = v8cfg
+
+  thread = v8cfg.target.process.GetSelectedThread()
+  frame = v8cfg.jsstack_frame(result, thread, fp)
+  print >> result, frame
 
 # And the initialization code to add your commands 
 def __lldb_init_module(debugger, internal_dict):
-	target = debugger.GetSelectedTarget()
-	delay = []
-	for key, value in SYMBOLS.iteritems():
-		ret = load_symbol(target, value[0])
-		if isinstance(ret, lldb.SBError):
-			print 'failed to load symbol: ', ret
-			return
-		elif ret is None:
-			if len(value) == 3:
-				ret = value[2]
-			elif len(value) == 2:
-				pass
-			else:
-				print 'failed to load symbol: ', key
+  target = debugger.GetSelectedTarget()
 
-		if ret is not None:
-			internal_dict[key] = ret
-
-	for i in range(target.GetNumModules()):
-		mod = target.GetModuleAtIndex(i)
-		for j in range(mod.GetNumSymbols()):
-			sym = mod.GetSymbolAtIndex(j)
-			if 'v8dbg_frametype_' in sym.name:
-				val = load_symbol(target, sym.name)
-				key = sym.name.replace('v8dbg_frametype_', '')
-				FRAMETYPE[key] = val
-				FRAMETYPE[val] = key
-			elif 'v8dbg_parent_' in sym.name:
-				val = load_symbol(target, sym.name)
-				key = sym.name.replace('v8dbg_parent_', '').split('__')
-				parent = key[1]
-				child = key[0]
-				parent_klass = CLASS.get(parent, { 'name': parent, 'fields': {} })
-				child_klass = CLASS.get(child, { 'name': child, 'parent': parent_klass, 'fields': {} })
-
-				child_klass['parent'] = parent_klass
-
-				CLASS[parent] = parent_klass
-				CLASS[child] = child_klass
-			elif 'v8dbg_class_' in sym.name:
-				val = load_symbol(target, sym.name)
-				key = sym.name.replace('v8dbg_class_', '').split('__')
-
-
-				kname = key[0]
-				field = key[1]
-				ktype = key[2]
-
-				klass = CLASS.get(kname, { 'name': kname, 'fields': {} })
-
-				klass['fields'][field] = {
-					'type': ktype,
-					'name': field,
-					'offset': val,
-				}
-				pass
-			elif 'v8dbg_type_' in sym.name:
-				val = load_symbol(target, sym.name)
-				key = sym.name.replace('v8dbg_type_', '')
-				TYPE[key] = val
-				TYPE[val] = key
-
-
-
-	major = internal_dict['major']
-	minor = internal_dict['minor']
-	build = internal_dict['build']
-	patch = internal_dict['patch']
-
-	print 'Identified V8 Version {major}.{minor}.{build}.{patch}'.format(**internal_dict)
-
-	debugger.HandleCommand('command script add -f v8.jsstack jsstack')
-	debugger.HandleCommand('command script add -f v8.jsframe jsframe')
+  v8cfg = V8Cfg(target)
+  internal_dict['v8cfg'] = v8cfg
+  print 'Identified version: %s' % (v8cfg.version)
+	
+  debugger.HandleCommand('command script add -f v8.jsstack jsstack')
+  debugger.HandleCommand('command script add -f v8.jsframe jsframe')
