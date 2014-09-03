@@ -326,7 +326,7 @@ class V8Cfg:
       return slen
 
     if not slen:
-      return 'anonymous'
+      return ''
 
     ## XXX
     #off = CLASS['SeqAsciiString']['fields']['chars']['offset'] - 1
@@ -357,6 +357,21 @@ class V8Cfg:
       return error
 
     name = self.jstr_print(fstr)
+
+    if not name:
+      name = 'anonymous'
+      off = self.get_offset('SharedFunctionInfo.inferred_name')
+      fstr = self.process.ReadPointerFromMemory(pointer + off, error)
+
+      if not error.Success():
+        return error
+
+      inferred = self.jstr_print(fstr)
+
+      if not inferred:
+        inferred = 'anon'
+
+      name = name + ' (as %s)' % inferred
 
     return name
 
