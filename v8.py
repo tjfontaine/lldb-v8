@@ -375,6 +375,27 @@ class V8Cfg:
 
     return name
 
+  def jsargs(self, func):
+    off = self.get_offset('SharedFunctionInfo.length')
+    nargs = self.read_heap_smi(func, off)
+
+    if isinstance(nargs, lldb.SBError):
+      return nargs
+
+    error = lldb.SBError()
+
+    args = []
+    for i in range(nargs):
+      off = self.constants['V8_OFF_FP_ARGS'] + i + 1
+      arg = self.process.ReadPointerFromMemory(func + off, error)
+
+      if not error.Success():
+        return error
+
+      args.append(arg)
+
+    return args
+
   def jsstack_frame(self, result, thread, fp):
     error = lldb.SBError()
     off = fp + self.constants['V8_OFF_FP_CONTEXT']
@@ -444,9 +465,24 @@ class V8Cfg:
     if isinstance(funcname, lldb.SBError):
       return funcname
 
+    args = self.jsargs(func)
+
+    if isinstance(args, lldb.SBError):
+      return args
+
+    fargs = []
+
+    for arg in args:
+      fargs.append('{arg:#x}'.format(arg=arg))
+
+    if len(fargs):
+      val = '<%s> (%s)' % (funcname, ', '.join(fargs))
+    else:
+      val = '<%s>' % (funcname)
+
     return {
       'fp': fp,
-      'val': '<%s>' % funcname
+      'val': val,
     }
 	
   def jsstack_thread(self, thread, result):
