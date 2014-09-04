@@ -1,6 +1,7 @@
 import lldb
 import shlex
 import struct
+import traceback
 
 def bytearray_to_int(bytes, bytesize):
     """Utility function to convert a bytearray into an integer.
@@ -296,14 +297,18 @@ class V8Cfg:
     maddr = self.process.ReadPointerFromMemory(addr + heapoff, error)
 
     if not error.Success():
+      #print (hex(addr), heapoff, hex(addr + heapoff), 'failed to get maddr')
+      #print ''.join(traceback.format_stack())
       return error
 
     if (maddr & mask) != tag:
+      #print 'not a heapobject'
       return False
 
     hbyte = self.process.ReadMemory(maddr + aoff, 1, error)
 
     if not error.Success():
+      #print (hex(maddr), aoff, hex(maddr + aoff), 'failed to get hbyte')
       return error
 
     hbyte = bytearray_to_uint(hbyte, 1)
@@ -375,7 +380,41 @@ class V8Cfg:
 
     return name
 
-  def jsargs(self, func):
+  def obj_jstype(self, arg):
+    failmask = self.constants['V8_FailureTagMask']
+    failtag = self.constants['V8_FailureTag']
+
+    if (arg & failmask) == failtag:
+      return "'Failure' Object"
+
+    if self.v8_is_smi(arg):
+      return 'SMI: value = %d' % (self.v8_smi(arg))
+
+    typename = self.read_type(arg)
+
+    if isinstance(typename, lldb.SBError):
+      return typename
+
+    typename = typename.split('__')[0]
+
+    if 'Oddball' in typename:
+      error = lldb.SBError()
+      off = self.get_offset('Oddball.tostring')
+      ptr = self.process.ReadPointerFromMemory(arg + off, error)
+
+      if not error.Success():
+        return error
+
+      sstr = jstr_print(ptr)
+
+      if isinstance(sstr, lldb.SBError):
+        return sstr
+
+      typename += ': "%s"' % (sstr)
+
+    return typename
+
+  def jsargs(self, func, fp):
     off = self.get_offset('SharedFunctionInfo.length')
     nargs = self.read_heap_smi(func, off)
 
@@ -386,13 +425,20 @@ class V8Cfg:
 
     args = []
     for i in range(nargs):
-      off = self.constants['V8_OFF_FP_ARGS'] + i + 1
-      arg = self.process.ReadPointerFromMemory(func + off, error)
+      off = fp + self.constants['V8_OFF_FP_ARGS']
+      off += (nargs - i - 1) * self.target.addr_size
+
+      arg = self.process.ReadPointerFromMemory(off, error)
 
       if not error.Success():
         return error
 
-      args.append(arg)
+      otype = self.obj_jstype(arg)
+
+      if isinstance(otype, lldb.SBError):
+        return otype
+
+      args.append([arg, otype])
 
     return args
 
@@ -465,7 +511,7 @@ class V8Cfg:
     if isinstance(funcname, lldb.SBError):
       return funcname
 
-    args = self.jsargs(func)
+    args = self.jsargs(func, fp)
 
     if isinstance(args, lldb.SBError):
       return args
@@ -473,7 +519,7 @@ class V8Cfg:
     fargs = []
 
     for arg in args:
-      fargs.append('{arg:#x}'.format(arg=arg))
+      fargs.append('{arg:#x} [{otype}]'.format(arg=arg[0], otype=arg[1]))
 
     if len(fargs):
       val = '<%s> (%s)' % (funcname, ', '.join(fargs))
@@ -559,6 +605,22 @@ def jsframe(debugger, command, result, internal_dict):
   frame = v8cfg.jsstack_frame(result, thread, fp)
   print >> result, frame
 
+def jstype(debugger, command, result, internal_dict):
+  args = shlex.split(command)
+  addr = int(args[0], 16)
+
+  v8cfg = internal_dict.get('v8cfg')
+
+  if not v8cfg:
+    v8cfg = V8Cfg(debugger.GetSelectedTarget())
+    internal_dict['v8cfg'] = v8cfg
+
+  frame = v8cfg.obj_jstype(addr)
+
+  print >> result, frame
+
+# And the initialization code to add your commands 
+
 # And the initialization code to add your commands 
 def __lldb_init_module(debugger, internal_dict):
   target = debugger.GetSelectedTarget()
@@ -569,3 +631,4 @@ def __lldb_init_module(debugger, internal_dict):
 	
   debugger.HandleCommand('command script add -f v8.jsstack jsstack')
   debugger.HandleCommand('command script add -f v8.jsframe jsframe')
+  debugger.HandleCommand('command script add -f v8.jsframe jstype')
