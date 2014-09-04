@@ -635,7 +635,42 @@ class V8Cfg:
     for i in range(threads):
       print >> result, 'thread #{i}'.format(i=i)
       self.jsstack_thread(self.process.GetThreadAtIndex(i), result)
-    
+
+  def jsobj_print(self, addr, depth=1):
+    ret = {
+      'address': addr,
+    }
+
+    if self.v8_is_smi(addr):
+      ret['value'] = self.v8_smi(addr)
+      ret['type'] = 'SMI'
+    else:
+      typename = self.read_type(addr)
+      ret['type'] = typename.split('__')[0]
+
+      if isinstance(typename, lldb.SBError):
+        return typename
+
+      if 'String' in typename:
+        val = self.jstr_print(addr)
+
+        if isinstance(val, lldb.SBError):
+          return val
+
+        ret['value'] = val
+      elif 'JSObject' in typename:
+        val = self.jsobj_print_jsobject(addr, depth=depth)
+
+        if isinstance(val, lldb.SBError):
+          return val
+
+        ret['value'] = val
+
+    return ret
+
+  def jsobj_print_jsobject(self, addr, depth=1, parent=None, member=None):
+    if not depth:
+      return { 'address': addr, 'value': None }
 
 def jsstack(debugger, command, result, internal_dict):
   v8cfg = internal_dict.get('v8cfg')
@@ -675,7 +710,19 @@ def jstype(debugger, command, result, internal_dict):
 
   print >> result, frame
 
-# And the initialization code to add your commands 
+def jsprint(debugger, command, result, internal_dict):
+  args = shlex.split(command)
+  addr = int(args[0], 16)
+
+  v8cfg = internal_dict.get('v8cfg')
+
+  if not v8cfg:
+    v8cfg = V8Cfg(debugger.GetSelectedTarget())
+    internal_dict['v8cfg'] = v8cfg
+
+  frame = v8cfg.jsobj_print(addr)
+
+  print >> result, frame
 
 # And the initialization code to add your commands 
 def __lldb_init_module(debugger, internal_dict):
@@ -688,3 +735,4 @@ def __lldb_init_module(debugger, internal_dict):
   debugger.HandleCommand('command script add -f v8.jsstack jsstack')
   debugger.HandleCommand('command script add -f v8.jsframe jsframe')
   debugger.HandleCommand('command script add -f v8.jsframe jstype')
+  debugger.HandleCommand('command script add -f v8.jsprint jsprint')
