@@ -220,10 +220,24 @@ class V8Cfg:
           key = sym.name.replace('v8dbg_parent_', '').split('__')
           parent = key[1]
           child = key[0]
-          parent_klass = self.classes.get(parent, { 'name': parent, 'fields': {} })
-          child_klass = self.classes.get(child, { 'name': child, 'parent': parent_klass, 'fields': {} })
+          parent_klass = self.classes.get(parent)
+          child_klass = self.classes.get(child)
 
+          if not parent_klass:
+            parent_klass = {}
+
+          parent_klass['name'] = parent
+
+          if 'fields' not in parent_klass:
+            parent_klass['fields'] = {}
+
+          if not child_klass:
+            child_klass = {}
+
+          child_klass['name'] = child
           child_klass['parent'] = parent_klass
+          if 'fields' not in child_klass:
+            child_klass['fields'] = {}
 
           self.classes[parent] = parent_klass
           self.classes[child] = child_klass
@@ -236,13 +250,23 @@ class V8Cfg:
           field = key[1]
           ktype = key[2]
 
-          klass = self.classes.get(kname, { 'name': kname, 'fields': {} })
+          klass = self.classes.get(kname)
+
+          if not klass:
+            klass = {}
+
+          klass['name'] = kname
+
+          if 'fields' not in klass:
+            klass['fields'] = {}
 
           klass['fields'][field] = {
             'type': ktype,
             'name': field,
             'offset': val,
           }
+
+          self.classes[kname] = klass
         elif 'v8dbg_type_' in sym.name:
           val = self.load_symbol(sym.name)
           key = sym.name.replace('v8dbg_type_', '')
@@ -283,7 +307,7 @@ class V8Cfg:
   def get_offset(self, name):
     parts = name.split('.')
     klass = self.classes.get(parts[0])
-    member = klass['fields'][parts[1]]
+    member = klass['fields'].get(parts[1])
     return member['offset'] - 1
 
   def read_type(self, addr):
@@ -345,11 +369,43 @@ class V8Cfg:
       return error
 
     return blob
+
+  def jstr_print_cons(self, addr):
+    first = self.get_offset('ConsString.first')
+    second = self.get_offset('ConsString.second')
+
+    error = lldb.SBError()
+
+    ptr1 = self.process.ReadPointerFromMemory(addr + first, error)
+
+    if not error.Success():
+      return error
+
+    ptr2 = self.process.ReadPointerFromMemory(addr + second, error)
+
+    if not error.Success():
+      return error
+
+    part1 = self.jstr_print(ptr1)
+
+    if isinstance(part1, lldb.SBError):
+      return part1
+
+    part2 = self.jstr_print(ptr2)
+
+    if isinstance(part2, lldb.SBError):
+      return part2
+
+    return part1 + part2
 	
   def jstr_print(self, addr):
     typename = self.read_type(addr)
+
     if 'SeqAsciiString' in typename:
       typename = self.jstr_print_seq(addr)
+    elif 'ConsString' in typename:
+      typename = self.jstr_print_cons(addr)
+
     return typename
 
   def jsfunc_name(self, pointer):
