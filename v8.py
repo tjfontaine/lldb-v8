@@ -455,13 +455,13 @@ class V8Cfg:
 
     if 'Oddball' in typename:
       error = lldb.SBError()
-      off = self.get_offset('Oddball.tostring')
+      off = self.get_offset('Oddball.to_string')
       ptr = self.process.ReadPointerFromMemory(arg + off, error)
 
       if not error.Success():
         return error
 
-      sstr = jstr_print(ptr)
+      sstr = self.jstr_print(ptr)
 
       if isinstance(sstr, lldb.SBError):
         return sstr
