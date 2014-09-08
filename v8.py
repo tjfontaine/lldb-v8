@@ -120,6 +120,30 @@ def get_stack_frames(thread):
 
     return map(GetStackFrame, range(thread.GetNumFrames()))
 
+def get_args_as_string(frame, showFuncName=True):
+    """
+    Returns the args of the input frame object as a string.
+    """
+    # arguments     => True
+    # locals        => False
+    # statics       => False
+    # in_scope_only => True
+    vars = frame.GetVariables(True, False, False, True) # type of SBValueList
+    args = [] # list of strings
+    for var in vars:
+      args.append("(%s)%s=%s" % (var.GetTypeName(), var.GetName(), var.GetValue()))
+
+    if frame.GetFunction():
+      name = frame.GetFunction().GetName()
+    elif frame.GetSymbol():
+      name = frame.GetSymbol().GetName()
+    else:
+      name = ""
+    if showFuncName:
+      return "%s(%s)" % (name, ", ".join(args))
+    else:
+      return "(%s)" % (", ".join(args))
+
 
 SYMBOLS = {
 	'major': ['_ZN2v88internal7Version6major_E'],
