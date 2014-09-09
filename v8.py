@@ -381,9 +381,7 @@ class V8Cfg:
     if not slen:
       return ''
 
-    ## XXX
-    #off = CLASS['SeqAsciiString']['fields']['chars']['offset'] - 1
-    off = 23
+    off = self.get_offset('SeqAsciiString.chars')
 
     error = lldb.SBError()
 
@@ -656,9 +654,10 @@ class V8Cfg:
   def jsstack(self, result):
     threads = self.process.GetNumThreads()
 
-    for i in range(threads):
-      print >> result, 'thread #{i}'.format(i=i)
-      self.jsstack_thread(self.process.GetThreadAtIndex(i), result)
+    #for i in range(0):
+    i = 0
+    print >> result, 'thread #{i}'.format(i=i)
+    self.jsstack_thread(self.process.GetThreadAtIndex(i), result)
 
   def jsobj_print(self, addr, depth=1):
     ret = {
@@ -692,9 +691,187 @@ class V8Cfg:
 
     return ret
 
+  def read_heap_array(self, addr):
+    atype = self.read_type(addr)
+
+    if 'FixedArray' not in atype:
+      return False
+
+    length = self.read_heap_smi(addr, self.get_offset('FixedArrayBase.length'))
+
+    if not length:
+      return []
+
+    off = self.get_offset('FixedArray.data')
+
+    error = lldb.SBError()
+
+    addr = self.process.ReadMemory(addr + off, length * self.target.addr_size, error)
+
+    if not error.Success():
+      return error
+
+    arr = []
+
+    for i in range(0, len(addr), self.target.addr_size):
+      arr.append(bytearray_to_uint(addr[i : self.target.addr_size + i], self.target.addr_size))
+
+    return arr
+
+  def read_heap_dict(self, addr):
+    properties = {}
+
+    arr = self.read_heap_array(addr)
+
+    if not arr or isinstance(arr, lldb.SBError):
+      return arr
+    elif not len(arr):
+      return {}
+
+    start = self.constants['V8_DICT_START_INDEX']
+    size = self.constants['V8_DICT_PREFIX_SIZE']
+    esize = self.constants['V8_DICT_ENTRY_SIZE']
+
+    for i in range(start + size, len(arr), esize):
+      if self.jsobj_is_undefined(addr):
+        continue
+
+      key = ''
+
+      if self.v8_is_smi(arr[i]):
+        key = str(self.v8_smi(arr[i]))
+      else:
+        if self.jsobj_is_hole(arr[i]):
+          continue
+
+        typename = self.read_type(arr[i])
+
+        if not 'String' in typename:
+          return typename
+
+        key = self.jstr_print(arr[i])
+
+      if key:
+        properties[key] = arr[i + 1]
+
+    return properties
+
+
+  def jsobj_is_undefined(self, addr):
+    return 'undefined' in jsobj_is_oddball(addr)
+
+  def jsobj_is_hole(self, addr):
+    return 'hole' in jsobj_is_oddball(addr)
+
+  def jsobj_is_oddball(self, addr):
+    typename = self.read_type(addr)
+
+    if 'Oddball' in typename:
+      error = lldb.SBError()
+      off = self.get_offset('Oddball.to_string')
+      ptr = self.process.ReadPointerFromMemory(addr + off, error)
+
+      if not error.Success():
+        return error
+
+      return self.jstr_print(ptr)
+
+    return ''
+
   def jsobj_print_jsobject(self, addr, depth=1, parent=None, member=None):
     if not depth:
       return { 'address': addr, 'value': None }
+
+    error = lldb.SBError()
+
+    off = self.get_offset('JSObject.properties')
+
+    ptr = self.process.ReadPointerFromMemory(addr + off, error)
+
+    if not error.Success():
+      return error
+
+    jstype = self.read_type(ptr)
+
+    result = {}
+
+    if 'FixedArray' not in jstype:
+      result[jstype] = {
+        'value': 'unknown',
+        'type': jstype,
+        'address': ptr,
+      }
+      return result
+
+    off = self.get_offset('HeapObject.map')
+    maddr = self.process.ReadPointerFromMemory(addr + off, error)
+
+    if not error.Success():
+      return error
+
+    off = self.get_offset('JSObject.elements')
+    elements = self.process.ReadPointerFromMemory(addr + off, error)
+
+    if not error.Success():
+      return error
+
+    harray = self.read_heap_array(elements)
+
+    if isinstance(harray, lldb.SBError):
+      return harray
+
+    if harray and len(harray):
+      off = self.get_offset('Map.bit_field2')
+      bitfield = self.process.ReadMemory(maddr + off, 1, error)
+
+      if not error.Success():
+        return error
+
+      bitfield = bytearray_to_uint(bitfield, 1)
+
+      kind = bit_field2 >> self.constants['V8_ELEMENTS_KIND_SHIFT']
+      kind &= (1 << self.constants['V8_ELEMENTS_KIND_BITCOUNT']) - 1
+
+      if kind == self.constants['V8_ELEMENTS_FAST_ELEMENTS'] or kind == self.constants['V8_ELEMENTS_FAST_HOLEY_ELEMENTS']:
+         pass
+      elif kind == self.constants['V8_ELEMENTS_DICTIONARY_ELEMENTS']:
+         pass
+
+    if 'V8_DICT_SHIFT' in self.constants: 
+      off = self.get_offset('Map.bit_field3')
+      bitfield = self.process.ReadPointerFromMemory(maddr + off, error)
+      if not error.Success():
+        return error
+
+      if self.v8_smi(bitfield) & (1 << self.constants['V8_DICT_SHIFT']):
+        print 'we have dict'
+        properties = self.read_heap_dict(ptr)
+        print properties
+        return properties
+    else:
+      print 'no shift'
+
+    props = self.read_heap_array(ptr)
+
+    off = self.get_offset('Map.instance_descriptors')
+
+    if not error.Success():
+      return error
+
+    ptr = self.process.ReadPointerFromMemory(maddr + off, error)
+
+    descs = self.read_heap_array(ptr)
+
+    off = self.get_offset('Map.inobject_properties')
+
+    ninprops = self.process.ReadMemory(maddr + off, 1, error)
+
+    if not error.Success():
+      return error
+
+    ninprops = bytearray_to_uint(ninprops, 1)
+
+    print 'more to do'
 
 def jsstack(debugger, command, result, internal_dict):
   v8cfg = internal_dict.get('v8cfg')
