@@ -1,149 +1,29 @@
+# Copyright Joyent, Inc. and other Node contributors. All rights reserved.
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to
+# deal in the Software without restriction, including without limitation the
+# rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+# sell copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+# FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+# IN THE SOFTWARE.
+
 import lldb
 import shlex
 import struct
 import traceback
 
-def bytearray_to_int(bytes, bytesize):
-    """Utility function to convert a bytearray into an integer.
-
-    It interprets the bytearray in the little endian format. For a big endian
-    bytearray, just do ba.reverse() on the object before passing it in.
-    """
-    import struct
-
-    # Little endian followed by a format character.
-    template = "<%c"
-    if bytesize == 1:
-        fmt = template % 'b'
-    elif bytesize == 2:
-        fmt = template % 'h'
-    elif bytesize == 4:
-        fmt = template % 'i'
-    elif bytesize == 8:
-        fmt = template % 'q'
-    else:
-        return None
-
-    unpacked = struct.unpack(fmt, str(bytes))
-    return unpacked[0]
-
-def bytearray_to_uint(bytes, bytesize):
-    """Utility function to convert a bytearray into an integer.
-
-    It interprets the bytearray in the little endian format. For a big endian
-    bytearray, just do ba.reverse() on the object before passing it in.
-    """
-    import struct
-
-    # Little endian followed by a format character.
-    template = "<%c"
-    if bytesize == 1:
-        fmt = template % 'B'
-    elif bytesize == 2:
-        fmt = template % 'H'
-    elif bytesize == 4:
-        fmt = template % 'I'
-    elif bytesize == 8:
-        fmt = template % 'Q'
-    else:
-        return None
-
-    unpacked = struct.unpack(fmt, str(bytes))
-    return unpacked[0]
-
-def get_function_names(thread):
-    """
-    Returns a sequence of function names from the stack frames of this thread.
-    """
-    def GetFuncName(i):
-        return thread.GetFrameAtIndex(i).GetFunctionName()
-
-    return map(GetFuncName, range(thread.GetNumFrames()))
-
-
-def get_symbol_names(thread):
-    """
-    Returns a sequence of symbols for this thread.
-    """
-    def GetSymbol(i):
-        return thread.GetFrameAtIndex(i).GetSymbol().GetName()
-
-    return map(GetSymbol, range(thread.GetNumFrames()))
-
-
-def get_pc_addresses(thread):
-    """
-    Returns a sequence of pc addresses for this thread.
-    """
-    def GetPCAddress(i):
-        return thread.GetFrameAtIndex(i).GetPCAddress()
-
-    return map(GetPCAddress, range(thread.GetNumFrames()))
-
-
-def get_filenames(thread):
-    """
-    Returns a sequence of file names from the stack frames of this thread.
-    """
-    def GetFilename(i):
-        return thread.GetFrameAtIndex(i).GetLineEntry().GetFileSpec().GetFilename()
-
-    return map(GetFilename, range(thread.GetNumFrames()))
-
-
-def get_line_numbers(thread):
-    """
-    Returns a sequence of line numbers from the stack frames of this thread.
-    """
-    def GetLineNumber(i):
-        return thread.GetFrameAtIndex(i).GetLineEntry().GetLine()
-
-    return map(GetLineNumber, range(thread.GetNumFrames()))
-
-
-def get_module_names(thread):
-    """
-    Returns a sequence of module names from the stack frames of this thread.
-    """
-    def GetModuleName(i):
-        return thread.GetFrameAtIndex(i).GetModule().GetFileSpec().GetFilename()
-
-    return map(GetModuleName, range(thread.GetNumFrames()))
-
-
-def get_stack_frames(thread):
-    """
-    Returns a sequence of stack frames for this thread.
-    """
-    def GetStackFrame(i):
-        return thread.GetFrameAtIndex(i)
-
-    return map(GetStackFrame, range(thread.GetNumFrames()))
-
-def get_args_as_string(frame, showFuncName=True):
-    """
-    Returns the args of the input frame object as a string.
-    """
-    # arguments     => True
-    # locals        => False
-    # statics       => False
-    # in_scope_only => True
-    vars = frame.GetVariables(True, False, False, True) # type of SBValueList
-    args = [] # list of strings
-    for var in vars:
-      args.append("(%s)%s=%s" % (var.GetTypeName(), var.GetName(), var.GetValue()))
-
-    if frame.GetFunction():
-      name = frame.GetFunction().GetName()
-    elif frame.GetSymbol():
-      name = frame.GetSymbol().GetName()
-    else:
-      name = ""
-    if showFuncName:
-      return "%s(%s)" % (name, ", ".join(args))
-    else:
-      return "(%s)" % (", ".join(args))
-
+from utils import *
 
 SYMBOLS = {
 	'major': ['_ZN2v88internal7Version6major_E'],
@@ -855,10 +735,10 @@ class V8Cfg:
 
     off = self.get_offset('Map.instance_descriptors')
 
+    ptr = self.process.ReadPointerFromMemory(maddr + off, error)
+
     if not error.Success():
       return error
-
-    ptr = self.process.ReadPointerFromMemory(maddr + off, error)
 
     descs = self.read_heap_array(ptr)
 
@@ -871,7 +751,42 @@ class V8Cfg:
 
     ninprops = bytearray_to_uint(ninprops, 1)
 
-    print 'more to do'
+    if 'V8_PROP_IDX_CONTENT' not in self.constants:
+      content = descs
+    else:
+      print 'we have prop idx'
+
+    if len(descs) > self.constants['V8_PROP_IDX_FIRST']:
+      rndescs = (len(descs) - self.constants['V8_PROP_IDX_FIRST']) / self.constants['V8_PROP_DESC_SIZE']
+    else:
+      rndescs = 0
+
+    properties = {}
+
+    for i in range(rndescs):
+      baseidx = self.constants['V8_PROP_IDX_FIRST'] + (i * self.constants['V8_PROP_DESC_SIZE'])
+      keyidx = baseidx + self.constants['V8_PROP_DESC_KEY']
+      validx = baseidx + self.constants['V8_PROP_DESC_VALUE']
+      detidx = baseidx + self.constants['V8_PROP_DESC_DETAILS']
+
+      key = self.jstr_print(descs[keyidx])
+
+      val = content[validx]
+      val = self.v8_smi(val) - ninprops
+
+      if val < 0:
+        print 'stored in object'
+      else:
+        if val > len(props) and val < rndescs:
+          continue
+        elif val > len(props):
+          #print ('badkey', key, val)
+          continue
+        ptr = props[val]
+
+      properties[key] = self.jsobj_print(ptr, depth=depth-1)
+
+    return properties
 
 def jsstack(debugger, command, result, internal_dict):
   v8cfg = internal_dict.get('v8cfg')
@@ -923,7 +838,9 @@ def jsprint(debugger, command, result, internal_dict):
 
   frame = v8cfg.jsobj_print(addr)
 
-  print >> result, frame
+  import pprint
+
+  print >> result, pprint.pprint(frame)
 
 # And the initialization code to add your commands 
 def __lldb_init_module(debugger, internal_dict):
