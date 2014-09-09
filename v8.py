@@ -88,8 +88,6 @@ class V8Cfg:
     self.target = target
     self.process = target.GetProcess()
 
-    self.constants = {}
-
     self.frametype = {}
     self.classes = {}
     self.types = {}
@@ -108,7 +106,7 @@ class V8Cfg:
           print 'failed to load symbol: ', key
 
       if ret is not None:
-        self.constants[key] = ret
+        setattr(self, key, ret)
 
     for i in range(target.GetNumModules()):
       mod = target.GetModuleAtIndex(i)
@@ -177,12 +175,12 @@ class V8Cfg:
           self.types[key] = val
           self.types[val] = key
 
-    major = self.constants['major']
-    minor = self.constants['minor']
-    build = self.constants['build']
-    patch = self.constants['patch']
+    major = self.major
+    minor = self.minor
+    build = self.build
+    patch = self.patch
 
-    self.version = '{major}.{minor}.{build}.{patch}'.format(**self.constants)
+    self.version = '{major}.{minor}.{build}.{patch}'.format(**locals())
 
   def load_symbol(self, symbol):
     syms = self.target.FindSymbols(symbol)
@@ -199,13 +197,13 @@ class V8Cfg:
       return None
 
   def v8_is_smi(self, addr):
-    smi = self.constants['V8_SmiTag']
-    mask = self.constants['V8_SmiTagMask']
+    smi = self.V8_SmiTag
+    mask = self.V8_SmiTagMask
     return ((addr & mask) == smi)
 
   def v8_smi(self, addr):
-    val = self.constants['V8_SmiValueShift']
-    sze = self.constants['V8_SmiShiftSize']
+    val = self.V8_SmiValueShift
+    sze = self.V8_SmiShiftSize
     return (addr >> (val + sze))
 
   def get_offset(self, name):
@@ -216,8 +214,8 @@ class V8Cfg:
 
   def read_type(self, addr):
     heapoff = self.get_offset('HeapObject.map')
-    mask = self.constants['V8_HeapObjectTagMask']
-    tag = self.constants['V8_HeapObjectTag']
+    mask = self.V8_HeapObjectTagMask
+    tag = self.V8_HeapObjectTag
     aoff = self.get_offset('Map.instance_attributes')
 
     error = lldb.SBError()
@@ -339,8 +337,8 @@ class V8Cfg:
     return name
 
   def obj_jstype(self, arg):
-    failmask = self.constants['V8_FailureTagMask']
-    failtag = self.constants['V8_FailureTag']
+    failmask = self.V8_FailureTagMask
+    failtag = self.V8_FailureTag
 
     if (arg & failmask) == failtag:
       return "'Failure' Object"
@@ -383,7 +381,7 @@ class V8Cfg:
 
     args = []
     for i in range(nargs):
-      off = fp + self.constants['V8_OFF_FP_ARGS']
+      off = fp + self.V8_OFF_FP_ARGS
       off += (nargs - i - 1) * self.target.addr_size
 
       arg = self.process.ReadPointerFromMemory(off, error)
@@ -402,7 +400,7 @@ class V8Cfg:
 
   def jsstack_frame(self, result, thread, fp):
     error = lldb.SBError()
-    off = fp + self.constants['V8_OFF_FP_CONTEXT']
+    off = fp + self.V8_OFF_FP_CONTEXT
     pointer = self.process.ReadPointerFromMemory(off, error)
 
     if not error.Success():
@@ -418,7 +416,7 @@ class V8Cfg:
           'val': '<{ft}>'.format(ft=ft),
         }
 
-    off = fp + self.constants['V8_OFF_FP_MARKER']
+    off = fp + self.V8_OFF_FP_MARKER
     pointer = self.process.ReadPointerFromMemory(off, error)
 
     if not error.Success():
@@ -434,7 +432,7 @@ class V8Cfg:
           'val': '<{ft}>'.format(ft=ft),
         }
 
-    off = fp + self.constants['V8_OFF_FP_FUNCTION']
+    off = fp + self.V8_OFF_FP_FUNCTION
     pointer = self.process.ReadPointerFromMemory(off, error)
 
     if not error.Success():
@@ -608,9 +606,9 @@ class V8Cfg:
     elif not len(arr):
       return {}
 
-    start = self.constants['V8_DICT_START_INDEX']
-    size = self.constants['V8_DICT_PREFIX_SIZE']
-    esize = self.constants['V8_DICT_ENTRY_SIZE']
+    start = self.V8_DICT_START_INDEX
+    size = self.V8_DICT_PREFIX_SIZE
+    esize = self.V8_DICT_ENTRY_SIZE
 
     for i in range(start + size, len(arr), esize):
       if self.jsobj_is_undefined(addr):
@@ -709,21 +707,21 @@ class V8Cfg:
 
       bitfield = bytearray_to_uint(bitfield, 1)
 
-      kind = bit_field2 >> self.constants['V8_ELEMENTS_KIND_SHIFT']
-      kind &= (1 << self.constants['V8_ELEMENTS_KIND_BITCOUNT']) - 1
+      kind = bit_field2 >> self.V8_ELEMENTS_KIND_SHIFT
+      kind &= (1 << self.V8_ELEMENTS_KIND_BITCOUNT) - 1
 
-      if kind == self.constants['V8_ELEMENTS_FAST_ELEMENTS'] or kind == self.constants['V8_ELEMENTS_FAST_HOLEY_ELEMENTS']:
+      if kind == self.V8_ELEMENTS_FAST_ELEMENTS or kind == self.V8_ELEMENTS_FAST_HOLEY_ELEMENTS:
          pass
-      elif kind == self.constants['V8_ELEMENTS_DICTIONARY_ELEMENTS']:
+      elif kind == self.V8_ELEMENTS_DICTIONARY_ELEMENTS:
          pass
 
-    if 'V8_DICT_SHIFT' in self.constants: 
+    if 'V8_DICT_SHIFT' in dir(self):
       off = self.get_offset('Map.bit_field3')
       bitfield = self.process.ReadPointerFromMemory(maddr + off, error)
       if not error.Success():
         return error
 
-      if self.v8_smi(bitfield) & (1 << self.constants['V8_DICT_SHIFT']):
+      if self.v8_smi(bitfield) & (1 << self.V8_DICT_SHIFT):
         print 'we have dict'
         properties = self.read_heap_dict(ptr)
         print properties
@@ -751,23 +749,23 @@ class V8Cfg:
 
     ninprops = bytearray_to_uint(ninprops, 1)
 
-    if 'V8_PROP_IDX_CONTENT' not in self.constants:
+    if 'V8_PROP_IDX_CONTENT' not in dir(self):
       content = descs
     else:
       print 'we have prop idx'
 
-    if len(descs) > self.constants['V8_PROP_IDX_FIRST']:
-      rndescs = (len(descs) - self.constants['V8_PROP_IDX_FIRST']) / self.constants['V8_PROP_DESC_SIZE']
+    if len(descs) > self.V8_PROP_IDX_FIRST:
+      rndescs = (len(descs) - self.V8_PROP_IDX_FIRST) / self.V8_PROP_DESC_SIZE
     else:
       rndescs = 0
 
     properties = {}
 
     for i in range(rndescs):
-      baseidx = self.constants['V8_PROP_IDX_FIRST'] + (i * self.constants['V8_PROP_DESC_SIZE'])
-      keyidx = baseidx + self.constants['V8_PROP_DESC_KEY']
-      validx = baseidx + self.constants['V8_PROP_DESC_VALUE']
-      detidx = baseidx + self.constants['V8_PROP_DESC_DETAILS']
+      baseidx = self.V8_PROP_IDX_FIRST + (i * self.V8_PROP_DESC_SIZE)
+      keyidx = baseidx + self.V8_PROP_DESC_KEY
+      validx = baseidx + self.V8_PROP_DESC_VALUE
+      detidx = baseidx + self.V8_PROP_DESC_DETAILS
 
       key = self.jstr_print(descs[keyidx])
 
