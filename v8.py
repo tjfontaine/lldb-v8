@@ -128,18 +128,13 @@ class V8Cfg:
           if not parent_klass:
             parent_klass = {}
 
-          parent_klass['name'] = parent
-
-          if 'fields' not in parent_klass:
-            parent_klass['fields'] = {}
+          parent_klass['!name'] = parent
 
           if not child_klass:
             child_klass = {}
 
-          child_klass['name'] = child
-          child_klass['parent'] = parent_klass
-          if 'fields' not in child_klass:
-            child_klass['fields'] = {}
+          child_klass['!name'] = child
+          child_klass['!parent'] = parent_klass
 
           self.classes[parent] = parent_klass
           self.classes[child] = child_klass
@@ -157,12 +152,9 @@ class V8Cfg:
           if not klass:
             klass = {}
 
-          klass['name'] = kname
+          klass['!name'] = kname
 
-          if 'fields' not in klass:
-            klass['fields'] = {}
-
-          klass['fields'][field] = {
+          klass[field] = {
             'type': ktype,
             'name': field,
             'offset': val,
@@ -209,7 +201,7 @@ class V8Cfg:
   def get_offset(self, name):
     parts = name.split('.')
     klass = self.classes.get(parts[0])
-    member = klass['fields'].get(parts[1])
+    member = klass.get(parts[1])
     return member['offset'] - 1
 
   def read_type(self, addr):
