@@ -23,6 +23,8 @@ import shlex
 import struct
 import traceback
 
+from pprint import pprint
+
 from utils import *
 
 SYMBOLS = {
@@ -82,6 +84,99 @@ SYMBOLS = {
 	'V8_ELEMENTS_FAST_HOLEY_ELEMENTS': ['v8dbg_elements_fast_holey_elements', None, 3],
 	'V8_ELEMENTS_DICTIONARY_ELEMENTS': ['v8dbg_elements_dictionary_elements', None, 6],
 }
+
+class V8Object(object):
+  def __init__(self, cfg, addr):
+    #print 'v8 object %x' % (addr)
+    self.cfg = cfg
+    self.addr = addr
+    self._get_type()
+
+  def _get_type(self):
+    self._typename = self.cfg.read_type(self.addr)
+    self._type = self.cfg.classes.get(self._typename)
+
+    if not self._type:
+      self._type = self.cfg.classes.get('SeqAsciiString')
+      self._typename = 'SeqAsciiString'
+      #print 'unknown type: %s' % (self._typename)
+      #raise AttributeError
+
+    return self._typename
+
+  def typename(self):
+    if self._typename:
+      return self._typename
+    else:
+      return self._get_type()
+
+  def __getattr__(self, name):
+    curr = self._type
+    ret = None
+
+    while curr:
+      if name in curr:
+        ret = curr[name]
+        break
+      curr = curr.get('!parent')
+
+    if not ret:
+      raise AttributeError
+
+
+    t = ret['type']
+
+    #if t not in ['SMI',] + self.cfg.classes.keys():
+    #  print 'unsupported type: %s' % (t)
+    #  raise AttributeError
+
+    off = ret['offset'] - 1
+    #print 'gotattr %s.%s (%s [%d])' % (curr['!name'], name, t, off)
+    error = lldb.SBError()
+
+    #print 'reading address %x + %d' % (self.addr, off)
+    #print 'read addr %x + %x' % (self.addr, off)
+    addr = self.cfg.process.ReadPointerFromMemory(self.addr + off, error)
+
+    if not error.Success():
+      raise error
+
+    if t == 'SMI':
+      if self.cfg.v8_is_smi(addr):
+        return self.cfg.v8_smi(addr)
+      else:
+        raise Exception('Failed to read SMI: %x'.format(addr))
+    elif t in self.cfg.classes.keys():
+      return V8Object(self.cfg, addr)
+    else:
+      return self.addr + off
+      #print 'returning object'
+
+  def _get_fields(self, klass):
+    parent = klass.get('!parent')
+    fields = [klass['!name'] + ' {']
+
+    if parent:
+      pfields = self._get_fields(parent).split('\n')
+      fields.append('\t' + '\n\t'.join(pfields))
+
+    for key, value in klass.items():
+      if '!' in key:
+        continue
+
+      #print ('getting value for key', key, value['offset'], hex(self.addr))
+      fields.append('\t{key}: {value}'.format(key=key, value=repr(getattr(self, key))))
+
+    fields.append('}')
+
+    return '\n'.join(fields)
+
+  def __str__(self):
+    self._get_type()
+    curr = self._type
+
+    return self._get_fields(self._type)
+      
 
 class V8Cfg:
   def __init__(self, target):
@@ -163,7 +258,7 @@ class V8Cfg:
           self.classes[kname] = klass
         elif 'v8dbg_type_' in sym.name:
           val = self.load_symbol(sym.name)
-          key = sym.name.replace('v8dbg_type_', '')
+          key = sym.name.replace('v8dbg_type_', '').split('__')[0]
           self.types[key] = val
           self.types[val] = key
 
@@ -235,6 +330,7 @@ class V8Cfg:
 
   def read_heap_smi(self, addr, off):
     error = lldb.SBError()
+    #print 'read smi %x + %x' % (addr, off)
     ptr = self.process.ReadPointerFromMemory(addr + off, error)
 
     if not error.Success():
@@ -243,19 +339,12 @@ class V8Cfg:
     return self.v8_smi(ptr)
 
   def jstr_print_seq(self, addr):
-    strlen = self.get_offset('String.length')
-    slen = self.read_heap_smi(addr, strlen)
-    if isinstance(slen, lldb.SBError):
-      return slen
-
-    if not slen:
-      return ''
-
-    off = self.get_offset('SeqAsciiString.chars')
+    obj = V8Object(self, addr)
 
     error = lldb.SBError()
-
-    blob = self.process.ReadMemory(addr + off, slen, error)
+    if not obj.length:
+      return ''
+    blob = self.process.ReadMemory(obj.chars, obj.length, error)
 
     if not error.Success():
       return error
@@ -302,24 +391,14 @@ class V8Cfg:
 
   def jsfunc_name(self, pointer):
     error = lldb.SBError()
-    off = self.get_offset('SharedFunctionInfo.name')
+    obj = V8Object(self, pointer)
 
-    fstr = self.process.ReadPointerFromMemory(pointer + off, error)
-
-    if not error.Success():
-      return error
-
-    name = self.jstr_print(fstr)
+    name = self.jstr_print(obj.name.addr)
 
     if not name:
       name = 'anonymous'
-      off = self.get_offset('SharedFunctionInfo.inferred_name')
-      fstr = self.process.ReadPointerFromMemory(pointer + off, error)
 
-      if not error.Success():
-        return error
-
-      inferred = self.jstr_print(fstr)
+      inferred = self.jstr_print(obj.inferred_name.addr)
 
       if not inferred:
         inferred = 'anon'
