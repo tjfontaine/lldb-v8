@@ -352,30 +352,11 @@ class V8Cfg:
     return blob
 
   def jstr_print_cons(self, addr):
-    first = self.get_offset('ConsString.first')
-    second = self.get_offset('ConsString.second')
+    obj = V8Object(self, addr)
 
-    error = lldb.SBError()
+    part1 = self.jstr_print(obj.first.addr)
 
-    ptr1 = self.process.ReadPointerFromMemory(addr + first, error)
-
-    if not error.Success():
-      return error
-
-    ptr2 = self.process.ReadPointerFromMemory(addr + second, error)
-
-    if not error.Success():
-      return error
-
-    part1 = self.jstr_print(ptr1)
-
-    if isinstance(part1, lldb.SBError):
-      return part1
-
-    part2 = self.jstr_print(ptr2)
-
-    if isinstance(part2, lldb.SBError):
-      return part2
+    part2 = self.jstr_print(obj.second.addr)
 
     return part1 + part2
 	
@@ -425,28 +406,15 @@ class V8Cfg:
     typename = typename.split('__')[0]
 
     if 'Oddball' in typename:
-      error = lldb.SBError()
-      off = self.get_offset('Oddball.to_string')
-      ptr = self.process.ReadPointerFromMemory(arg + off, error)
-
-      if not error.Success():
-        return error
-
-      sstr = self.jstr_print(ptr)
-
-      if isinstance(sstr, lldb.SBError):
-        return sstr
-
+      obj = V8Object(self, arg)
+      sstr = self.jstr_print(obj.to_string.addr)
       typename += ': "%s"' % (sstr)
 
     return typename
 
   def jsargs(self, func, fp):
-    off = self.get_offset('SharedFunctionInfo.length')
-    nargs = self.read_heap_smi(func, off)
-
-    if isinstance(nargs, lldb.SBError):
-      return nargs
+    obj = V8Object(self, func)
+    nargs = obj.length
 
     error = lldb.SBError()
 
@@ -526,19 +494,11 @@ class V8Cfg:
         'val': 'internal (Code: {pointer:#016x})'.format(pointer= pointer),
       }
 
-    off = self.get_offset('JSFunction.shared')
+    obj = V8Object(self, pointer)
 
-    func = self.process.ReadPointerFromMemory(pointer + off, error)
+    funcname = self.jsfunc_name(obj.shared.addr)
 
-    if not error.Success():
-      return error
-
-    funcname = self.jsfunc_name(func)
-
-    if isinstance(funcname, lldb.SBError):
-      return funcname
-
-    args = self.jsargs(func, fp)
+    args = self.jsargs(obj.shared.addr, fp)
 
     if isinstance(args, lldb.SBError):
       return args
