@@ -97,12 +97,15 @@ class V8Object(object):
     self._get_type()
 
   def _get_type(self):
-    self._typename = self.cfg.read_type(self.addr)
-    self._type = self.cfg.classes.get(self._typename)
+    if self.cfg.v8_is_smi(self.addr):
+      self._typename = 'SMI'
+    else:
+      self._typename = self.cfg.read_type(self.addr)
+      self._type = self.cfg.classes.get(self._typename)
 
-    if not self._type:
-      print 'unknown type: %s' % (self._typename)
-      raise AttributeError
+      if not self._type:
+        print 'unknown type: %s' % (self._typename)
+        raise AttributeError
 
     return self._typename
 
@@ -205,6 +208,16 @@ class V8Object(object):
 
     #return V8Object(self.cfg, addr)
     return addr
+
+  def value(self):
+    if 'SMI' in self.typename:
+      return self.cfg.v8_smi(self.addr)
+    elif 'String' in self.typename:
+      return self.cfg.jstr_print(self.addr)
+    elif 'JSObject' in self.typename:
+      return self.cfg.jsobj_print_jsobject(self.addr, depth=2)
+    else:
+      return None
 
 
 class V8Cfg:
@@ -594,19 +607,12 @@ class V8Cfg:
       'address': addr,
     }
 
-    if self.v8_is_smi(addr):
-      ret['value'] = self.v8_smi(addr)
-      ret['type'] = 'SMI'
+    obj = V8Object(self, addr)
+    ret['type'] = obj.typename
+    if depth > 0:
+      ret['value'] = obj.value()
     else:
-      typename = self.read_type(addr)
-      ret['type'] = typename.split('__')[0]
-
-      if 'String' in typename:
-        val = self.jstr_print(addr)
-        ret['value'] = val
-      elif 'JSObject' in typename:
-        val = self.jsobj_print_jsobject(addr, depth=depth)
-        ret['value'] = val
+      ret['value'] = None
 
     return ret
 
@@ -693,9 +699,8 @@ class V8Cfg:
 
     if len(elements):
       bitfield = maddr.bit_field2
-      bitfield = bytearray_to_uint(bitfield, 1)
 
-      kind = bit_field2 >> self.V8_ELEMENTS_KIND_SHIFT
+      kind = bitfield >> self.V8_ELEMENTS_KIND_SHIFT
       kind &= (1 << self.V8_ELEMENTS_KIND_BITCOUNT) - 1
 
       if kind == self.V8_ELEMENTS_FAST_ELEMENTS or kind == self.V8_ELEMENTS_FAST_HOLEY_ELEMENTS:
@@ -708,7 +713,7 @@ class V8Cfg:
 
       if bitfield & (1 << self.V8_DICT_SHIFT):
         print 'we have dict'
-        properties = self.read_heap_dict(ptr)
+        properties = self.read_heap_dict(elements.addr)
         print properties
         return properties
     else:
@@ -745,15 +750,15 @@ class V8Cfg:
       val = int(val) - ninprops
 
       if val < 0:
-        print 'stored in object'
+        print ('stored in object', key)
       else:
         oval = val
         val = (val >> 32)
         if val > len(props) and val < rndescs:
-          print ('huh key?', key, hex(val), len(props), rndescs)
+          #print ('huh key?', key, hex(val), len(props), rndescs)
           continue
         elif val > len(props):
-          print ('badkey', key, hex(val), len(props), hex(oval))
+          #print ('badkey', key, hex(val), len(props), hex(oval))
           continue
         ptr = props[val]
 
