@@ -216,6 +216,12 @@ class V8Object(object):
       return self.cfg.jstr_print(self.addr)
     elif 'JSObject' in self.typename:
       return self.cfg.jsobj_print_jsobject(self.addr, depth=2)
+    elif 'Oddball' in self.typename:
+      val = self.to_string.value()
+      if val in ('true', 'false'):
+        return bool(val)
+      else:
+        return val
     else:
       return None
 
@@ -804,6 +810,17 @@ def jstype(debugger, command, result, internal_dict):
 
   print >> result, frame
 
+def js_iter(obj):
+  if isinstance(obj, dict) and 'value' in obj:
+    return js_iter(obj['value'])
+  elif isinstance(obj, dict):
+    o = {}
+    for key, item in obj.iteritems():
+      o[key] = js_iter(item)
+    return o
+  else:
+    return obj
+
 def jsprint(debugger, command, result, internal_dict):
   args = shlex.split(command)
   addr = int(args[0], 16)
@@ -816,9 +833,9 @@ def jsprint(debugger, command, result, internal_dict):
 
   frame = v8cfg.jsobj_print(addr)
 
-  import pprint
+  import json
 
-  print >> result, pprint.pprint(frame)
+  print >> result, json.dumps(js_iter(frame), indent=4)
 
 # And the initialization code to add your commands 
 def __lldb_init_module(debugger, internal_dict):
