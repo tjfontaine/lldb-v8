@@ -85,6 +85,10 @@ SYMBOLS = {
 	'V8_ELEMENTS_DICTIONARY_ELEMENTS': ['v8dbg_elements_dictionary_elements', None, 6],
 }
 
+def check_error(error):
+  if not error.Success():
+    raise Exception(str(error))
+
 class V8Object(object):
   def __init__(self, cfg, addr):
     #print 'v8 object %x' % (addr)
@@ -97,13 +101,12 @@ class V8Object(object):
     self._type = self.cfg.classes.get(self._typename)
 
     if not self._type:
-      self._type = self.cfg.classes.get('SeqAsciiString')
-      self._typename = 'SeqAsciiString'
-      #print 'unknown type: %s' % (self._typename)
-      #raise AttributeError
+      print 'unknown type: %s' % (self._typename)
+      raise AttributeError
 
     return self._typename
 
+  @property
   def typename(self):
     if self._typename:
       return self._typename
@@ -138,8 +141,7 @@ class V8Object(object):
     #print 'read addr %x + %x' % (self.addr, off)
     addr = self.cfg.process.ReadPointerFromMemory(self.addr + off, error)
 
-    if not error.Success():
-      raise error
+    check_error(error)
 
     if t == 'SMI':
       if self.cfg.v8_is_smi(addr):
@@ -148,8 +150,17 @@ class V8Object(object):
         raise Exception('Failed to read SMI: %x'.format(addr))
     elif t in self.cfg.classes.keys():
       return V8Object(self.cfg, addr)
-    else:
+    elif t in ('int',):
+      blob = self.cfg.process.ReadMemory(self.addr + off, 1, error)
+      return bytearray_to_uint(blob, 1)
+    elif t in ('char', 'uintptr_t'):
       return self.addr + off
+    elif t in ('double',):
+      blob = self.cfg.process.ReadMemory(self.addr + off, 4, error)
+      check_error(error)
+      return struct.unpack('f', blob)[0]
+    else:
+      raise Exception("unknown type: %s" % (t))
       #print 'returning object'
 
   def _get_fields(self, klass):
@@ -176,7 +187,25 @@ class V8Object(object):
     curr = self._type
 
     return self._get_fields(self._type)
-      
+
+  def __len__(self):
+    return self.length
+
+  def __getitem__(self, item):
+    if item < 0 or not self.length:
+      raise IndexError
+
+    error = lldb.SBError()
+
+    off = self.data + (self.cfg.target.addr_size * item)
+
+    addr = self.cfg.process.ReadPointerFromMemory(off, error)
+
+    check_error(error)
+
+    #return V8Object(self.cfg, addr)
+    return addr
+
 
 class V8Cfg:
   def __init__(self, target):
@@ -279,7 +308,7 @@ class V8Cfg:
       if error.Success():
         return bytearray_to_int(val, size)
       else:
-        return error
+        raise error
     else:
       return None
 
@@ -309,10 +338,7 @@ class V8Cfg:
 
     maddr = self.process.ReadPointerFromMemory(addr + heapoff, error)
 
-    if not error.Success():
-      #print (hex(addr), heapoff, hex(addr + heapoff), 'failed to get maddr')
-      #print ''.join(traceback.format_stack())
-      return error
+    check_error(error)
 
     if (maddr & mask) != tag:
       #print 'not a heapobject'
@@ -320,9 +346,7 @@ class V8Cfg:
 
     hbyte = self.process.ReadMemory(maddr + aoff, 1, error)
 
-    if not error.Success():
-      #print (hex(maddr), aoff, hex(maddr + aoff), 'failed to get hbyte')
-      return error
+    check_error(error)
 
     hbyte = bytearray_to_uint(hbyte, 1)
 
@@ -333,8 +357,7 @@ class V8Cfg:
     #print 'read smi %x + %x' % (addr, off)
     ptr = self.process.ReadPointerFromMemory(addr + off, error)
 
-    if not error.Success():
-      return error
+    check_error(error)
 
     return self.v8_smi(ptr)
 
@@ -346,8 +369,7 @@ class V8Cfg:
       return ''
     blob = self.process.ReadMemory(obj.chars, obj.length, error)
 
-    if not error.Success():
-      return error
+    check_error(error)
 
     return blob
 
@@ -425,8 +447,7 @@ class V8Cfg:
 
       arg = self.process.ReadPointerFromMemory(off, error)
 
-      if not error.Success():
-        return error
+      check_error(error)
 
       otype = self.obj_jstype(arg)
 
@@ -580,22 +601,11 @@ class V8Cfg:
       typename = self.read_type(addr)
       ret['type'] = typename.split('__')[0]
 
-      if isinstance(typename, lldb.SBError):
-        return typename
-
       if 'String' in typename:
         val = self.jstr_print(addr)
-
-        if isinstance(val, lldb.SBError):
-          return val
-
         ret['value'] = val
       elif 'JSObject' in typename:
         val = self.jsobj_print_jsobject(addr, depth=depth)
-
-        if isinstance(val, lldb.SBError):
-          return val
-
         ret['value'] = val
 
     return ret
@@ -615,10 +625,14 @@ class V8Cfg:
 
     error = lldb.SBError()
 
-    addr = self.process.ReadMemory(addr + off, length * self.target.addr_size, error)
+    toff = addr + off
+    tlen = length * self.target.addr_size
 
-    if not error.Success():
-      return error
+    addr = self.process.ReadMemory(toff, tlen, error)
+
+    #print ('reading from', hex(toff), 'total', hex(tlen))
+
+    check_error(error)
 
     arr = []
 
@@ -680,8 +694,7 @@ class V8Cfg:
       off = self.get_offset('Oddball.to_string')
       ptr = self.process.ReadPointerFromMemory(addr + off, error)
 
-      if not error.Success():
-        return error
+      check_error(error)
 
       return self.jstr_print(ptr)
 
@@ -693,14 +706,8 @@ class V8Cfg:
 
     error = lldb.SBError()
 
-    off = self.get_offset('JSObject.properties')
-
-    ptr = self.process.ReadPointerFromMemory(addr + off, error)
-
-    if not error.Success():
-      return error
-
-    jstype = self.read_type(ptr)
+    obj = V8Object(self, addr)
+    jstype = obj.properties.typename
 
     result = {}
 
@@ -708,34 +715,16 @@ class V8Cfg:
       result[jstype] = {
         'value': 'unknown',
         'type': jstype,
-        'address': ptr,
+        'address': obj.proprties.addr,
       }
       return result
 
-    off = self.get_offset('HeapObject.map')
-    maddr = self.process.ReadPointerFromMemory(addr + off, error)
+    maddr = obj.map
 
-    if not error.Success():
-      return error
+    elements = obj.elements
 
-    off = self.get_offset('JSObject.elements')
-    elements = self.process.ReadPointerFromMemory(addr + off, error)
-
-    if not error.Success():
-      return error
-
-    harray = self.read_heap_array(elements)
-
-    if isinstance(harray, lldb.SBError):
-      return harray
-
-    if harray and len(harray):
-      off = self.get_offset('Map.bit_field2')
-      bitfield = self.process.ReadMemory(maddr + off, 1, error)
-
-      if not error.Success():
-        return error
-
+    if len(elements):
+      bitfield = maddr.bit_field2
       bitfield = bytearray_to_uint(bitfield, 1)
 
       kind = bit_field2 >> self.V8_ELEMENTS_KIND_SHIFT
@@ -747,12 +736,9 @@ class V8Cfg:
          pass
 
     if 'V8_DICT_SHIFT' in dir(self):
-      off = self.get_offset('Map.bit_field3')
-      bitfield = self.process.ReadPointerFromMemory(maddr + off, error)
-      if not error.Success():
-        return error
+      bitfield = maddr.bit_field3
 
-      if self.v8_smi(bitfield) & (1 << self.V8_DICT_SHIFT):
+      if bitfield & (1 << self.V8_DICT_SHIFT):
         print 'we have dict'
         properties = self.read_heap_dict(ptr)
         print properties
@@ -760,25 +746,11 @@ class V8Cfg:
     else:
       print 'no shift'
 
-    props = self.read_heap_array(ptr)
+    props = obj.properties
 
-    off = self.get_offset('Map.instance_descriptors')
+    descs = maddr.instance_descriptors
 
-    ptr = self.process.ReadPointerFromMemory(maddr + off, error)
-
-    if not error.Success():
-      return error
-
-    descs = self.read_heap_array(ptr)
-
-    off = self.get_offset('Map.inobject_properties')
-
-    ninprops = self.process.ReadMemory(maddr + off, 1, error)
-
-    if not error.Success():
-      return error
-
-    ninprops = bytearray_to_uint(ninprops, 1)
+    ninprops = maddr.inobject_properties
 
     if 'V8_PROP_IDX_CONTENT' not in dir(self):
       content = descs
@@ -801,15 +773,19 @@ class V8Cfg:
       key = self.jstr_print(descs[keyidx])
 
       val = content[validx]
-      val = self.v8_smi(val) - ninprops
+
+      val = int(val) - ninprops
 
       if val < 0:
         print 'stored in object'
       else:
+        oval = val
+        val = (val >> 32)
         if val > len(props) and val < rndescs:
+          print ('huh key?', key, hex(val), len(props), rndescs)
           continue
         elif val > len(props):
-          #print ('badkey', key, val)
+          print ('badkey', key, hex(val), len(props), hex(oval))
           continue
         ptr = props[val]
 
