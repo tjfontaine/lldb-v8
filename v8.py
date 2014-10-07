@@ -610,45 +610,13 @@ class V8Cfg:
 
     return ret
 
-  def read_heap_array(self, addr):
-    atype = self.read_type(addr)
-
-    if 'FixedArray' not in atype:
-      return False
-
-    length = self.read_heap_smi(addr, self.get_offset('FixedArrayBase.length'))
-
-    if not length:
-      return []
-
-    off = self.get_offset('FixedArray.data')
-
-    error = lldb.SBError()
-
-    toff = addr + off
-    tlen = length * self.target.addr_size
-
-    addr = self.process.ReadMemory(toff, tlen, error)
-
-    #print ('reading from', hex(toff), 'total', hex(tlen))
-
-    check_error(error)
-
-    arr = []
-
-    for i in range(0, len(addr), self.target.addr_size):
-      arr.append(bytearray_to_uint(addr[i : self.target.addr_size + i], self.target.addr_size))
-
-    return arr
 
   def read_heap_dict(self, addr):
     properties = {}
 
-    arr = self.read_heap_array(addr)
+    arr = V8Object(self, addr)
 
-    if not arr or isinstance(arr, lldb.SBError):
-      return arr
-    elif not len(arr):
+    if not len(arr):
       return {}
 
     start = self.V8_DICT_START_INDEX
