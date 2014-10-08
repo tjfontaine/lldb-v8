@@ -225,6 +225,13 @@ class V8Object(object):
     else:
       return None
 
+  @property
+  def is_oddball(self):
+    if 'Oddball' not in self.typename:
+      return False
+    else:
+      return self.to_string.value()
+
 
 class V8Cfg:
   def __init__(self, target):
@@ -402,16 +409,13 @@ class V8Cfg:
 
     return typename
 
-  def jsfunc_name(self, pointer):
-    error = lldb.SBError()
-    obj = V8Object(self, pointer)
-
-    name = self.jstr_print(obj.name.addr)
+  def jsfunc_name(self, obj):
+    name = obj.name.value()
 
     if not name:
       name = 'anonymous'
 
-      inferred = self.jstr_print(obj.inferred_name.addr)
+      inferred = obj.inferred_name.value()
 
       if not inferred:
         inferred = 'anon'
@@ -427,20 +431,15 @@ class V8Cfg:
     if (arg & failmask) == failtag:
       return "'Failure' Object"
 
-    if self.v8_is_smi(arg):
-      return 'SMI: value = %d' % (self.v8_smi(arg))
+    obj = V8Object(self, arg)
 
-    typename = self.read_type(arg)
-
-    if isinstance(typename, lldb.SBError):
-      return typename
-
-    typename = typename.split('__')[0]
-
-    if 'Oddball' in typename:
-      obj = V8Object(self, arg)
-      sstr = self.jstr_print(obj.to_string.addr)
-      typename += ': "%s"' % (sstr)
+    if 'SMI' in obj.typename:
+      typename = 'SMI: value = %d' % (self.value())
+    elif obj.is_oddball is not False:
+      val = obj.is_oddball
+      typename = 'Oddball: "%s"' % (val)
+    else:
+      typename = obj.typename
 
     return typename
 
@@ -473,9 +472,7 @@ class V8Cfg:
     off = fp + self.V8_OFF_FP_CONTEXT
     pointer = self.process.ReadPointerFromMemory(off, error)
 
-    if not error.Success():
-      print >> result, 'error: ', error
-      return
+    check_error(error)
 
     if self.v8_is_smi(pointer):
       smi = self.v8_smi(pointer)
@@ -489,9 +486,7 @@ class V8Cfg:
     off = fp + self.V8_OFF_FP_MARKER
     pointer = self.process.ReadPointerFromMemory(off, error)
 
-    if not error.Success():
-      print >> result, error
-      return
+    check_error(error)
 
     if self.v8_is_smi(pointer):
       smi = self.v8_smi(pointer)
@@ -505,34 +500,19 @@ class V8Cfg:
     off = fp + self.V8_OFF_FP_FUNCTION
     pointer = self.process.ReadPointerFromMemory(off, error)
 
-    if not error.Success():
-      print >> result, 'error: ', error
-      return
+    check_error(error)
 	
-    typename = self.read_type(pointer)
+    obj = V8Object(self, pointer)
 
-    if isinstance(typename, lldb.SBError):
-      print >> result, typename
-      return
-
-    if not typename:
-      #print >> result, '{addr:#016x} not a heap object'.format(addr=pointer)
-      return
-
-    if 'Code' in typename:
+    if 'Code' in obj.typename:
       return {
         'fp': fp,
         'val': 'internal (Code: {pointer:#016x})'.format(pointer= pointer),
       }
 
-    obj = V8Object(self, pointer)
-
-    funcname = self.jsfunc_name(obj.shared.addr)
+    funcname = self.jsfunc_name(obj.shared)
 
     args = self.jsargs(obj.shared.addr, fp)
-
-    if isinstance(args, lldb.SBError):
-      return args
 
     fargs = []
 
