@@ -229,7 +229,7 @@ class V8Object(object):
     if 'SMI' in self.typename:
       return self.cfg.v8_smi(self.addr)
     elif 'String' in self.typename:
-      return self.cfg.jstr_print(self.addr)
+      return self.cfg.jstr_print(self)
     elif 'JSObject' in self.typename:
       return self.cfg.jsobj_print_jsobject(self.addr, depth=2)
     elif 'Oddball' in self.typename:
@@ -401,9 +401,7 @@ class V8Cfg:
 
     return self.types[hbyte]
 
-  def jstr_print_seq(self, addr):
-    obj = V8Object(self, addr)
-
+  def jstr_print_seq(self, obj):
     error = lldb.SBError()
 
     if not obj.length:
@@ -415,22 +413,19 @@ class V8Cfg:
 
     return blob
 
-  def jstr_print_cons(self, addr):
-    obj = V8Object(self, addr)
-
-    part1 = self.jstr_print(obj.first.addr)
-
-    part2 = self.jstr_print(obj.second.addr)
+  def jstr_print_cons(self, obj):
+    part1 = self.jstr_print(obj.first)
+    part2 = self.jstr_print(obj.second)
 
     return part1 + part2
 	
-  def jstr_print(self, addr):
-    typename = self.read_type(addr)
+  def jstr_print(self, obj):
+    typename = obj.typename
 
     if 'SeqAsciiString' in typename:
-      typename = self.jstr_print_seq(addr)
+      typename = self.jstr_print_seq(obj)
     elif 'ConsString' in typename:
-      typename = self.jstr_print_cons(addr)
+      typename = self.jstr_print_cons(obj)
 
     return typename
 
@@ -468,8 +463,7 @@ class V8Cfg:
 
     return typename
 
-  def jsargs(self, func, fp):
-    obj = V8Object(self, func)
+  def jsargs(self, obj, fp):
     nargs = obj.length
 
     error = lldb.SBError()
@@ -537,7 +531,7 @@ class V8Cfg:
 
     funcname = self.jsfunc_name(obj.shared)
 
-    args = self.jsargs(obj.shared.addr, fp)
+    args = self.jsargs(obj.shared, fp)
 
     fargs = []
 
@@ -619,13 +613,11 @@ class V8Cfg:
     return ret
 
 
-  def read_heap_dict(self, addr):
+  def read_heap_dict(self, arr):
     properties = {}
 
-    arr = V8Object(self, addr)
-
     if not len(arr):
-      return {}
+      return properties
 
     start = self.V8_DICT_START_INDEX
     size = self.V8_DICT_PREFIX_SIZE
@@ -689,7 +681,7 @@ class V8Cfg:
 
       if bitfield & (1 << self.V8_DICT_SHIFT):
         print 'we have dict'
-        properties = self.read_heap_dict(elements.addr)
+        properties = self.read_heap_dict(elements)
         print properties
         return properties
     else:
@@ -719,7 +711,7 @@ class V8Cfg:
       validx = baseidx + self.V8_PROP_DESC_VALUE
       detidx = baseidx + self.V8_PROP_DESC_DETAILS
 
-      key = self.jstr_print(descs[keyidx])
+      key = self.jstr_print(V8Object(self, descs[keyidx]))
 
       val = content[validx]
 
