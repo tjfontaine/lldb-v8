@@ -792,6 +792,20 @@ def jsprint(debugger, command, result, internal_dict):
 
   print >> result, json.dumps(js_iter(frame), indent=4)
 
+def v8print(debugger, command, result, internal_dict):
+  args = shlex.split(command)
+  addr = int(args[0], 16)
+
+  v8cfg = internal_dict.get('v8cfg')
+
+  if not v8cfg:
+    v8cfg = V8Cfg(debugger.GetSelectedTarget())
+    internal_dict['v8cfg'] = v8cfg
+
+  obj = V8Object(v8cfg, addr)
+
+  print >> result, obj
+
 # And the initialization code to add your commands 
 def __lldb_init_module(debugger, internal_dict):
   target = debugger.GetSelectedTarget()
@@ -804,3 +818,4 @@ def __lldb_init_module(debugger, internal_dict):
   debugger.HandleCommand('command script add -f v8.jsframe jsframe')
   debugger.HandleCommand('command script add -f v8.jsframe jstype')
   debugger.HandleCommand('command script add -f v8.jsprint jsprint')
+  debugger.HandleCommand('command script add -f v8.v8print v8print')
