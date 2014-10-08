@@ -94,6 +94,7 @@ class V8Object(object):
     #print 'v8 object %x' % (addr)
     self.cfg = cfg
     self.addr = addr
+    self._type = None
     self._get_type()
 
   def _get_type(self):
@@ -166,12 +167,12 @@ class V8Object(object):
       raise Exception("unknown type: %s" % (t))
       #print 'returning object'
 
-  def _get_fields(self, klass):
+  def _get_fields(self, klass, depth=0):
     parent = klass.get('!parent')
     fields = [klass['!name'] + ' {']
 
     if parent:
-      pfields = self._get_fields(parent).split('\n')
+      pfields = self._get_fields(parent, depth=depth+1).split('\n')
       fields.append('\t' + '\n\t'.join(pfields))
 
     for key, value in klass.items():
@@ -181,6 +182,10 @@ class V8Object(object):
       #print ('getting value for key', key, value['offset'], hex(self.addr))
       fields.append('\t{key}: {value}'.format(key=key, value=repr(getattr(self, key))))
 
+    if depth == 0 and 'FixedArray' in self.typename:
+      for i in range(self.length):
+        fields.append('\t[%d]: 0x%016x' % (i, self[i]))
+
     fields.append('}')
 
     return '\n'.join(fields)
@@ -189,10 +194,18 @@ class V8Object(object):
     self._get_type()
     curr = self._type
 
-    return self._get_fields(self._type)
+    if curr:
+      return self._get_fields(curr)
+    else:
+      return repr(self)
 
   def __repr__(self):
-    return '<v8.%s at 0x%016x>' % (self.typename, self.addr)
+    if 'SMI' in self.typename:
+      return '<SMI: value = %d>' % (self.value())
+    elif self.is_oddball:
+      return '<Oddball: %s>' % (self.is_oddball)
+    else:
+      return '<v8.%s at 0x%016x>' % (self.typename, self.addr)
 
   def __len__(self):
     return self.length
@@ -392,8 +405,10 @@ class V8Cfg:
     obj = V8Object(self, addr)
 
     error = lldb.SBError()
+
     if not obj.length:
       return ''
+
     blob = self.process.ReadMemory(obj.chars, obj.length, error)
 
     check_error(error)
