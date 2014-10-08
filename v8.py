@@ -151,7 +151,9 @@ class V8Object(object):
       if self.cfg.v8_is_smi(addr):
         return self.cfg.v8_smi(addr)
       else:
-        raise Exception('Failed to read SMI: %x'.format(addr))
+        return addr
+        ## TODO this seemed right?
+        #raise Exception('Failed to read SMI: %s -- 0x%016x (0x%016x)' % (name, self.addr, addr))
     elif t in self.cfg.classes.keys():
       return V8Object(self.cfg, addr)
     elif t in ('int',):
@@ -180,7 +182,9 @@ class V8Object(object):
         continue
 
       #print ('getting value for key', key, value['offset'], hex(self.addr))
-      fields.append('\t{key}: {value}'.format(key=key, value=repr(getattr(self, key))))
+      fields.append('\t{key}[{off:#016x}]: {value}'.format(key=key,
+        off=value['offset']-1,
+        value=repr(getattr(self, key))))
 
     if depth == 0 and 'FixedArray' in self.typename:
       for i in range(self.length):
@@ -225,13 +229,18 @@ class V8Object(object):
     #return V8Object(self.cfg, addr)
     return addr
 
-  def value(self):
+  def value(self, depth=2):
+    if depth < 0:
+      return repr(self)
+
     if 'SMI' in self.typename:
       return self.cfg.v8_smi(self.addr)
     elif 'String' in self.typename:
       return self.cfg.jstr_print(self)
+    elif 'JSFunction' in self.typename:
+      return self.cfg.jsfunc_name(self.shared)
     elif 'JSObject' in self.typename:
-      return self.cfg.jsobj_print_jsobject(self.addr, depth=2)
+      return self.cfg.jsobj_print_jsobject(self.addr, depth=depth)
     elif 'Oddball' in self.typename:
       val = self.to_string.value()
       if val in ('true', 'false'):
@@ -418,6 +427,27 @@ class V8Cfg:
     part2 = self.jstr_print(obj.second)
 
     return part1 + part2
+
+  def jstr_print_external(self, obj):
+    error = lldb.SBError()
+
+    if not obj.length:
+      return ''
+
+    off = self.get_offset('ExternalString.resource')
+    addr = self.process.ReadPointerFromMemory(obj.addr + off, error)
+
+    check_error(error)
+
+    addr = self.process.ReadPointerFromMemory(addr + 4, error)
+
+    check_error(error)
+
+    blob = self.process.ReadMemory(addr, 10, error)
+
+    check_error(error)
+
+    return blob
 	
   def jstr_print(self, obj):
     typename = obj.typename
@@ -426,6 +456,8 @@ class V8Cfg:
       typename = self.jstr_print_seq(obj)
     elif 'ConsString' in typename:
       typename = self.jstr_print_cons(obj)
+    elif 'ExternalAsciiString' in typename:
+      typename = self.jstr_print_external(obj)
 
     return typename
 
@@ -605,8 +637,8 @@ class V8Cfg:
 
     obj = V8Object(self, addr)
     ret['type'] = obj.typename
-    if depth > 0:
-      ret['value'] = obj.value()
+    if depth >= 0:
+      ret['value'] = obj.value(depth=depth)
     else:
       ret['value'] = None
 
@@ -726,9 +758,14 @@ class V8Cfg:
           #print ('huh key?', key, hex(val), len(props), rndescs)
           continue
         elif val > len(props):
-          #print ('badkey', key, hex(val), len(props), hex(oval))
-          continue
-        ptr = props[val]
+          try:
+            obj = V8Object(self, oval)
+            ptr = oval
+          except:
+            print ('badkey', key, hex(val), len(props), hex(oval))
+            continue
+        else:
+          ptr = props[val]
 
       properties[key] = self.jsobj_print(ptr, depth=depth-1)
 
@@ -784,7 +821,15 @@ def js_iter(obj):
     return obj
 
 def jsprint(debugger, command, result, internal_dict):
-  args = shlex.split(command)
+  from optparse import OptionParser
+
+  parser = OptionParser()
+
+  parser.add_option('-v', dest='verbose', action="store_true")
+  parser.add_option('-d', dest='depth', type='int', default=2)
+
+  (options, args) = parser.parse_args(shlex.split(command))
+
   addr = int(args[0], 16)
 
   v8cfg = internal_dict.get('v8cfg')
@@ -793,11 +838,13 @@ def jsprint(debugger, command, result, internal_dict):
     v8cfg = V8Cfg(debugger.GetSelectedTarget())
     internal_dict['v8cfg'] = v8cfg
 
-  frame = v8cfg.jsobj_print(addr)
+  frame = v8cfg.jsobj_print(addr, depth=options.depth)
 
   import json
-
-  print >> result, json.dumps(js_iter(frame), indent=4)
+  if not options.verbose:
+    print >> result, json.dumps(js_iter(frame), indent=4)
+  else:
+    print >> result, json.dumps(frame, indent=4)
 
 def v8print(debugger, command, result, internal_dict):
   args = shlex.split(command)
