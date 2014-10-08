@@ -371,15 +371,6 @@ class V8Cfg:
 
     return self.types[hbyte]
 
-  def read_heap_smi(self, addr, off):
-    error = lldb.SBError()
-    #print 'read smi %x + %x' % (addr, off)
-    ptr = self.process.ReadPointerFromMemory(addr + off, error)
-
-    check_error(error)
-
-    return self.v8_smi(ptr)
-
   def jstr_print_seq(self, addr):
     obj = V8Object(self, addr)
 
