@@ -191,6 +191,9 @@ class V8Object(object):
 
     return self._get_fields(self._type)
 
+  def __repr__(self):
+    return '<v8.%s at 0x%016x>' % (self.typename, self.addr)
+
   def __len__(self):
     return self.length
 
@@ -232,6 +235,13 @@ class V8Object(object):
     else:
       return self.to_string.value()
 
+  @property
+  def is_undefined(self):
+    return self.is_oddball and 'undefined' in self.is_oddball
+
+  @property
+  def is_hole(self):
+    return self.is_oddball and 'hole' in self.is_oddball
 
 class V8Cfg:
   def __init__(self, target):
@@ -607,49 +617,23 @@ class V8Cfg:
     esize = self.V8_DICT_ENTRY_SIZE
 
     for i in range(start + size, len(arr), esize):
-      if self.jsobj_is_undefined(addr):
+      obj = V8Object(self, arr[i])
+
+      if obj.is_undefined or obj.is_hole:
         continue
 
-      key = ''
+      key = str(obj.value())
 
-      if self.v8_is_smi(arr[i]):
-        key = str(self.v8_smi(arr[i]))
+      if 'SMI' in obj.typename:
+        key = str(obj.value())
       else:
-        if self.jsobj_is_hole(arr[i]):
-          continue
-
         typename = self.read_type(arr[i])
 
-        if not 'String' in typename:
-          return typename
-
-        key = self.jstr_print(arr[i])
-
       if key:
-        properties[key] = arr[i + 1]
+        properties[key] = V8Object(self, arr[i + 1])
 
     return properties
 
-
-  def jsobj_is_undefined(self, addr):
-    return 'undefined' in jsobj_is_oddball(addr)
-
-  def jsobj_is_hole(self, addr):
-    return 'hole' in jsobj_is_oddball(addr)
-
-  def jsobj_is_oddball(self, addr):
-    typename = self.read_type(addr)
-
-    if 'Oddball' in typename:
-      error = lldb.SBError()
-      off = self.get_offset('Oddball.to_string')
-      ptr = self.process.ReadPointerFromMemory(addr + off, error)
-
-      check_error(error)
-
-      return self.jstr_print(ptr)
-
-    return ''
 
   def jsobj_print_jsobject(self, addr, depth=1, parent=None, member=None):
     if not depth:
