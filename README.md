@@ -1,3 +1,5 @@
+> **⚠️ This project is archived and no longer maintained.**
+
 Postmortem Analysis for lldb
 
 largely ported from [mdb
